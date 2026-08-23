@@ -1,27 +1,109 @@
+# Google Cloud Data Engineering Portfolio
+
+This repository contains four Google Cloud data engineering projects built around batch ETL, API ingestion, Apache Beam/Dataflow, BigQuery data warehousing, and real-time streaming analytics.
+
 ## Projects
 
-### SSIS ETL Pipeline for Fraud Detection Data
-Built an end-to-end ETL pipeline in **SQL Server Integration Services (SSIS)** using **Visual Studio** for fraud detection-related credit card payment datasets. The pipeline covered staging, transformation, dimension loading, fact loading, and referential integrity handling to support structured reporting and downstream analytics.
+| No. | Project | Main Focus | Main Services |
+|---|---|---|---|
+| 1A | BNM Exchange Rate Incremental ETL Pipeline | API-based daily ETL | Cloud Run Job, Cloud Scheduler, Cloud Storage, BigQuery, Looker Studio |
+| 1B | BNM Exchange Rate Apache Beam / Dataflow Pipeline | Scalable batch processing | Apache Beam, Dataflow, Cloud Storage, BigQuery, Looker Studio |
+| 2 | Amazon Product Analytics Batch Pipeline | CSV batch warehouse and dashboard | Cloud Storage, BigQuery, SQL, Looker Studio |
+| 3 | Real-Time Retail Event Streaming Pipeline | Streaming ingestion and transformation | Cloud Run Job, Pub/Sub, Dataflow, BigQuery, Looker Studio |
 
-**Tech Stack:** SSIS, SQL Server, ETL, Data Warehouse, Visual Studio  
+## Project ID and Region
 
----
+```text
+Project ID: project-a76ee6b5-c5cd-4392-86d
+Region: asia-southeast1
+```
 
-### HR Survey Analysis
-Analyzed employee exit survey data using Python to uncover workforce-related patterns and improve understanding of employee feedback. The work involved data cleaning, exploratory analysis, and deriving insights from structured survey data.
+If you reuse these projects under another Google Cloud project, replace the project ID in all commands and SQL queries.
 
-**Tech Stack:** Python, Pandas, Data Cleaning, EDA  
+## Portfolio Summary
 
----
+These projects demonstrate:
 
-### eBay Car Sales Analysis
-Performed exploratory analysis on used car listing data from eBay to identify pricing patterns, clean inconsistent records, and extract useful insights from marketplace-based vehicle data.
+- Python-based extraction and event generation
+- Cloud Storage raw data landing
+- BigQuery schema design, partitioning and clustering
+- Incremental loading and backfilling
+- Apache Beam and Dataflow processing
+- Pub/Sub real-time streaming
+- Cloud Run Jobs and Cloud Scheduler automation
+- SQL transformation views and business marts
+- Looker Studio dashboards
+- Pipeline monitoring and error-handling concepts
 
-**Tech Stack:** Python, Data Wrangling, Exploration, Jupyter Notebook  
+## Repository Structure
 
----
+```text
+gcp-data-engineering-portfolio/
+├── README.md
+├── project-1-bnm-fx-etl/
+│   └── README.md
+├── project-1b-bnm-fx-beam-dataflow/
+│   └── README.md
+├── project-2-amazon-product-analytics/
+│   └── README.md
+└── project-3-retail-realtime-pipeline/
+    └── README.md
+```
 
-### Traffic Indicators Analysis
-Worked with traffic-related indicator datasets to analyze patterns, improve data quality, and generate meaningful insights from tabular data using Python and Jupyter Notebook workflows.
+## General Google Cloud Navigation
 
-**Tech Stack:** Python, Data Analysis, Data Quality, Jupyter Notebook 
+### BigQuery
+
+```text
+Google Cloud Console → BigQuery → SQL workspace → New query
+```
+
+Use this for creating datasets, tables, views, and validation queries.
+
+### Cloud Storage
+
+```text
+Google Cloud Console → Cloud Storage → Buckets
+```
+
+Use this to verify uploaded raw files, staging files, or Dataflow temporary files.
+
+### Cloud Run Jobs
+
+```text
+Google Cloud Console → Cloud Run → Jobs
+```
+
+Use this to check Cloud Run Job configuration, executions, logs, environment variables, and service account.
+
+### Pub/Sub
+
+```text
+Google Cloud Console → Pub/Sub → Topics / Subscriptions
+```
+
+Use this to check event topics, BigQuery subscriptions, and Dataflow subscriptions.
+
+### Dataflow
+
+```text
+Google Cloud Console → Dataflow → Jobs
+```
+
+Use this to monitor running/failed Dataflow jobs, job graph, worker logs, and throughput.
+
+### Looker Studio
+
+```text
+Looker Studio → Create → Report → Add data → BigQuery
+```
+
+Use BigQuery views as dashboard data sources instead of raw tables where possible.
+
+## References
+
+- Cloud Run Jobs: https://cloud.google.com/run/docs/create-jobs
+- Cloud Run scheduled jobs: https://cloud.google.com/run/docs/execute/jobs-on-schedule
+- Pub/Sub BigQuery subscriptions: https://docs.cloud.google.com/pubsub/docs/create-bigquery-subscription
+- Pub/Sub to BigQuery with Dataflow: https://docs.cloud.google.com/dataflow/docs/tutorials/dataflow-stream-to-bigquery
+- BigQuery loading data from Cloud Storage: https://cloud.google.com/bigquery/docs/loading-data-cloud-storage-csv
