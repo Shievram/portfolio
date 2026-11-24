@@ -7,7 +7,7 @@ This project extends the BNM exchange-rate use case using Apache Beam and Cloud 
 ## Architecture
 
 ```text
-data.gov.my daily_1200 exchange-rate CSV
+BNM Open API
         ↓
 Apache Beam Pipeline
         ↓
