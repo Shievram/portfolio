@@ -2,22 +2,22 @@
 
 ## Overview
 
-This project extends the BNM exchange-rate use case using Apache Beam and Cloud Dataflow. The goal is to demonstrate a scalable processing design with raw data landing, BigQuery loading, validation, error handling, monitoring views, and a dashboard.
+This project extends [Project 1A: BNM Exchange Rate Incremental ETL Pipeline](../project-1-bnm-fx-etl/README.md) using Apache Beam and Cloud Dataflow. Both projects use the BNM Open API and the same JSON response structure. This pipeline archives the raw JSON in Cloud Storage, validates and enriches selected currency records, writes valid and rejected records separately to BigQuery, and supports analysis and pipeline monitoring in Looker Studio.
 
 ## Architecture
 
 ```text
-BNM Open API
+BNM Open API (JSON)
         ↓
-Apache Beam Pipeline
+Cloud Storage (raw JSON)
         ↓
-Cloud Dataflow
+Python preparation + Apache Beam / Cloud Dataflow
         ↓
-Cloud Storage Raw Files
-        ↓
-BigQuery Clean Table
-        ↓
-BigQuery Error Table
+  ┌─────┴─────┐
+  ↓           ↓
+BigQuery    BigQuery
+Clean Table Error Table
+  └─────┬─────┘
         ↓
 BigQuery Analysis and Monitoring Views
         ↓
@@ -58,6 +58,36 @@ Google Cloud Console → BigQuery → fx_dataset → bnm_exchange_rates_beam / b
 ```text
 Looker Studio → Add data → BigQuery → fx_dataset views ending with _beam
 ```
+
+## Source and JSON Contract
+
+The source uses the same request configuration and field mapping documented in [Project 1A's Python ETL script](../project-1-bnm-fx-etl/README.md#main-python-etl-script).
+
+- Endpoint: `https://api.bnm.gov.my/public/exchange-rate`
+- Accept header: `application/vnd.BNM.API.v1+json`
+- Query parameters: `session=1200` and `quote=rm` by default
+- Expected response: a JSON object containing a `data` array of currency records
+
+The following illustrative payload follows the flat field structure in Project 1A's documented parser. These are sample values, not live exchange rates.
+
+```json
+{
+  "data": [
+    {
+      "currency_code": "USD",
+      "rate_date": "2026-07-24",
+      "unit": 1,
+      "buying_rate": 4.10,
+      "selling_rate": 4.14,
+      "middle_rate": 4.12
+    }
+  ]
+}
+```
+
+The parser accepts `currency_code` or `currency`, and `rate_date` or `date`, as in Project 1A. Currency codes are normalized to uppercase. This project retains its original four selected currencies (USD, SGD, EUR and GBP) and metadata; Project 1A's additional currency metadata can be added if needed.
+
+Optional start and end dates filter the records returned by the API. The endpoint used in Project 1A is not assumed to provide a historical date range. Historical backfills require archived JSON snapshots or a separately verified historical API endpoint.
 
 ## BigQuery Tables
 
@@ -112,11 +142,10 @@ project-1b-bnm-fx-beam-dataflow/beam_pipeline/bnm_fx_beam_pipeline.py
 
 ```python
 import argparse
-import csv
-import io
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 
 import apache_beam as beam
 import requests
@@ -125,83 +154,135 @@ from apache_beam.options.pipeline_options import PipelineOptions
 from google.cloud import storage
 
 CURRENCY_METADATA = {
-    "usd": {"currency_name": "US Dollar", "country": "United States", "region": "North America", "is_asean": False, "currency_category": "Major"},
-    "sgd": {"currency_name": "Singapore Dollar", "country": "Singapore", "region": "ASEAN", "is_asean": True, "currency_category": "ASEAN"},
-    "eur": {"currency_name": "Euro", "country": "Euro Area", "region": "Europe", "is_asean": False, "currency_category": "Major"},
-    "gbp": {"currency_name": "British Pound", "country": "United Kingdom", "region": "Europe", "is_asean": False, "currency_category": "Major"},
+    "USD": {"currency_name": "US Dollar", "country": "United States", "region": "North America", "is_asean": False, "currency_category": "Major"},
+    "SGD": {"currency_name": "Singapore Dollar", "country": "Singapore", "region": "ASEAN", "is_asean": True, "currency_category": "ASEAN"},
+    "EUR": {"currency_name": "Euro", "country": "Euro Area", "region": "Europe", "is_asean": False, "currency_category": "Major"},
+    "GBP": {"currency_name": "British Pound", "country": "United Kingdom", "region": "Europe", "is_asean": False, "currency_category": "Major"},
 }
 
-SELECTED_CURRENCIES = ["usd", "sgd", "eur", "gbp"]
+SELECTED_CURRENCIES = ["USD", "SGD", "EUR", "GBP"]
 
 
 def decimal_string(value):
     if value in [None, "", "-"]:
         return None
     try:
-        return f"{float(value):.6f}"
-    except Exception:
+        number = Decimal(str(value))
+        if not number.is_finite():
+            return None
+        return format(number.quantize(Decimal("0.000001")), "f")
+    except (InvalidOperation, ValueError, TypeError):
         return None
 
 
-def prepare_source_data(start_date, end_date, bucket_name, project_id):
-    source_url = "https://storage.data.gov.my/finsector/exr/daily_1200.csv"
-    response = requests.get(source_url, timeout=60)
+def prepare_source_data(start_date, end_date, bucket_name, project_id,
+                        session="1200", quote="rm"):
+    source_url = "https://api.bnm.gov.my/public/exchange-rate"
+    headers = {"Accept": "application/vnd.BNM.API.v1+json"}
+    params = {"session": session, "quote": quote}
+    response = requests.get(source_url, headers=headers, params=params, timeout=30)
     response.raise_for_status()
+    raw_data = response.json()
 
-    rows = list(csv.DictReader(io.StringIO(response.text)))
-    rate_items = []
-    errors = []
     job_run_id = str(uuid.uuid4())
     load_timestamp = datetime.now(timezone.utc).isoformat()
+    pipeline_name = f"bnm_fx_beam_daily{session}"
+    rate_items = []
+    errors = []
 
     storage_client = storage.Client(project=project_id)
     bucket = storage_client.bucket(bucket_name)
-    raw_path = f"raw/daily_1200/job_run_id={job_run_id}/daily_1200.csv"
-    bucket.blob(raw_path).upload_from_string(response.text, content_type="text/csv")
+    raw_path = (
+        f"raw/session={session}/quote={quote}/"
+        f"job_run_id={job_run_id}/exchange_rate.json"
+    )
+    bucket.blob(raw_path).upload_from_string(
+        json.dumps(raw_data), content_type="application/json"
+    )
     raw_gcs_path = f"gs://{bucket_name}/{raw_path}"
 
-    for row in rows:
-        rate_date = row.get("date")
-        if not rate_date or not (start_date <= rate_date <= end_date):
+    if not isinstance(raw_data, dict) or not isinstance(raw_data.get("data"), list):
+        raise ValueError(f"Expected a JSON data array; raw snapshot: {raw_gcs_path}")
+
+    def reject(item, currency_code, rate_date, error_type, message):
+        errors.append({
+            "error_timestamp": load_timestamp,
+            "rate_date": rate_date,
+            "currency_code": currency_code,
+            "error_type": error_type,
+            "error_message": message,
+            "raw_response": json.dumps(item),
+            "pipeline_name": pipeline_name,
+            "job_run_id": job_run_id,
+        })
+
+    for item in raw_data["data"]:
+        if not isinstance(item, dict):
+            reject(item, None, None, "INVALID_RECORD", "Expected a currency object")
             continue
 
-        for code in SELECTED_CURRENCIES:
-            rate = decimal_string(row.get(code))
-            if rate is None:
-                errors.append({
-                    "error_timestamp": load_timestamp,
-                    "rate_date": rate_date,
-                    "currency_code": code.upper(),
-                    "error_type": "INVALID_RATE_VALUE",
-                    "error_message": f"Missing or invalid rate for {code}",
-                    "raw_response": json.dumps(row),
-                    "pipeline_name": "bnm_fx_beam_daily1200",
-                    "job_run_id": job_run_id,
-                })
-                continue
+        code = str(item.get("currency_code") or item.get("currency") or "").strip().upper()
+        if not code:
+            reject(item, None, None, "MISSING_CURRENCY", "Currency code is missing")
+            continue
+        if code not in SELECTED_CURRENCIES:
+            continue
 
-            meta = CURRENCY_METADATA[code]
-            rate_items.append({
-                "rate_date": rate_date,
-                "rate_session": "1200",
-                "quote_type": "rm",
-                "currency_code": code.upper(),
-                "currency_name": meta["currency_name"],
-                "country": meta["country"],
-                "region": meta["region"],
-                "is_asean": meta["is_asean"],
-                "currency_category": meta["currency_category"],
-                "unit": "1",
-                "buying_rate": None,
-                "selling_rate": None,
-                "middle_rate": rate,
-                "source_name": "data.gov.my daily_1200",
-                "raw_gcs_path": raw_gcs_path,
-                "pipeline_name": "bnm_fx_beam_daily1200",
-                "job_run_id": job_run_id,
-                "load_timestamp": load_timestamp,
-            })
+        # Match the field names and aliases used in Project 1A.
+        try:
+            rate_date = date.fromisoformat(
+                item.get("rate_date") or item.get("date") or ""
+            ).isoformat()
+        except (ValueError, TypeError):
+            reject(item, code, None, "INVALID_DATE", "Expected a valid ISO rate date")
+            continue
 
+        if (start_date and rate_date < start_date) or (end_date and rate_date > end_date):
+            continue
+
+        middle = decimal_string(item.get("middle_rate"))
+        buying = decimal_string(item.get("buying_rate"))
+        selling = decimal_string(item.get("selling_rate"))
+        unit_value = item.get("unit")
+        unit = "1" if unit_value in [None, "", "-"] else decimal_string(unit_value)
+
+        if middle is None or Decimal(middle) <= 0:
+            reject(item, code, rate_date, "INVALID_RATE_VALUE", "Missing or invalid middle rate")
+            continue
+        if unit is None or Decimal(unit) <= 0:
+            reject(item, code, rate_date, "INVALID_UNIT", "Unit must be positive")
+            continue
+        if any(
+            item.get(field) not in [None, "", "-"] and
+            (value is None or Decimal(value) <= 0)
+            for field, value in [("buying_rate", buying), ("selling_rate", selling)]
+        ):
+            reject(item, code, rate_date, "INVALID_RATE_VALUE", "Invalid buying or selling rate")
+            continue
+
+        meta = CURRENCY_METADATA[code]
+        rate_items.append({
+            "rate_date": rate_date,
+            "rate_session": session,
+            "quote_type": quote,
+            "currency_code": code,
+            "currency_name": meta["currency_name"],
+            "country": meta["country"],
+            "region": meta["region"],
+            "is_asean": meta["is_asean"],
+            "currency_category": meta["currency_category"],
+            "unit": unit,
+            "buying_rate": buying,
+            "selling_rate": selling,
+            "middle_rate": middle,
+            "source_name": "BNM OpenAPI",
+            "raw_gcs_path": raw_gcs_path,
+            "pipeline_name": pipeline_name,
+            "job_run_id": job_run_id,
+            "load_timestamp": load_timestamp,
+        })
+
+    print(f"Run {job_run_id}: {len(rate_items)} valid rows, {len(errors)} rejected rows; raw snapshot: {raw_gcs_path}")
     return rate_items, errors
 
 
@@ -209,15 +290,21 @@ def run():
     parser = argparse.ArgumentParser()
     parser.add_argument("--gcp_project_id", required=True)
     parser.add_argument("--bucket_name", required=True)
-    parser.add_argument("--start_date", required=True)
-    parser.add_argument("--end_date", required=True)
+    parser.add_argument("--session", default="1200")
+    parser.add_argument("--quote", default="rm")
+    parser.add_argument("--start_date", type=lambda value: date.fromisoformat(value).isoformat())
+    parser.add_argument("--end_date", type=lambda value: date.fromisoformat(value).isoformat())
     known_args, pipeline_args = parser.parse_known_args()
+    if known_args.start_date and known_args.end_date and known_args.start_date > known_args.end_date:
+        parser.error("--start_date must not be later than --end_date")
 
     rate_items, initial_errors = prepare_source_data(
         known_args.start_date,
         known_args.end_date,
         known_args.bucket_name,
         known_args.gcp_project_id,
+        known_args.session,
+        known_args.quote,
     )
 
     pipeline_options = PipelineOptions(pipeline_args)
@@ -259,8 +346,8 @@ python beam_pipeline/bnm_fx_beam_pipeline.py \
   --runner DirectRunner \
   --gcp_project_id project-a76ee6b5-c5cd-4392-86d \
   --bucket_name bnm_fx_beam \
-  --start_date 2026-07-01 \
-  --end_date 2026-07-24
+  --session 1200 \
+  --quote rm
 ```
 
 ## Run with DataflowRunner
@@ -279,9 +366,26 @@ python beam_pipeline/bnm_fx_beam_pipeline.py \
   --save_main_session \
   --gcp_project_id project-a76ee6b5-c5cd-4392-86d \
   --bucket_name bnm_fx_beam \
-  --start_date 2026-07-01 \
-  --end_date 2026-08-17
+  --session 1200 \
+  --quote rm
 ```
+
+## Engineering Decisions and Operational Behavior
+
+| Concern | Design |
+|---|---|
+| Source consistency | Reuses Project 1A's BNM Open API JSON field mapping, session and quote parameters. |
+| Raw data and lineage | Preserves the full parsed response in a run-specific Cloud Storage JSON object; valid rows retain the object URI and run ID. |
+| Incremental operation | Each invocation processes the returned exchange-rate snapshot, optionally restricted to a date range. It does not download a full historical CSV. |
+| Validation | Checks dates, positive middle rates and units, and supplied buying/selling rates before loading; rejected selected records go to the error table. Missing optional buying/selling rates remain null. |
+| Beam execution | For this small API snapshot, extraction, landing and validation run in Python before Beam starts; Beam handles the prepared success/error writes. Larger backfills could move transformation into Beam workers. |
+| Duplicate handling | Writes append-only to the clean table. The analytical view selects the latest row by rate date, session, quote and currency. This removes duplicates from reporting, not from physical storage. |
+| Failure recovery | HTTP, JSON decoding and Cloud Storage failures stop preparation. An invalid response envelope fails after archiving when possible. Row-level rejections enter the error table; BigQuery write failures require runner/log inspection. |
+| Monitoring | The job-run ID connects success and error counts. A run with no returned matching records produces no rows; check runner logs as well as monitoring views. |
+
+For scheduled execution, a Cloud Run Job or other orchestrator can invoke the pipeline with the daily session/quote parameters. A Cloud Scheduler trigger at 18:00 Asia/Kuala_Lumpur, as in Project 1A, is a possible daily schedule. This README describes the invocation; it does not establish that a scheduler is currently deployed.
+
+The SQL below preserves the existing analysis and monitoring views. Monitoring counts reflect the rows written to the two tables, not independent confirmation that the full Dataflow job succeeded.
 
 ## Analysis Views
 
@@ -407,4 +511,4 @@ ORDER BY latest_run_timestamp DESC;
 
 ## Portfolio Explanation
 
-> This project demonstrates how Apache Beam and Cloud Dataflow can be used to process exchange-rate data at scale. The pipeline lands raw source data in Cloud Storage, validates and writes processed rows to BigQuery, captures invalid records in an error table, and supports dashboard-level monitoring through SQL views.
+> This project extends Project 1A's BNM Open API JSON ingestion with Apache Beam and Cloud Dataflow. The pipeline archives raw JSON in Cloud Storage, prepares and validates currency records, writes valid and rejected rows separately to BigQuery, deduplicates analytical results using the business key, and supports Looker Studio reporting and run-level monitoring.
